@@ -65,16 +65,16 @@ from __future__ import print_function
 import numpy as np
 import os
 import tensorflow as tf
-from distributions import LearnableDiagonalGaussian, DiagonalGaussianFromInput
-from distributions import diag_gaussian_log_likelihood
-from distributions import KLCost_GaussianGaussian, Poisson
-from distributions import LearnableAutoRegressive1Prior
-from distributions import KLCost_GaussianGaussianProcessSampled
+from .distributions import LearnableDiagonalGaussian, DiagonalGaussianFromInput
+from .distributions import diag_gaussian_log_likelihood
+from .distributions import KLCost_GaussianGaussian, Poisson
+from .distributions import LearnableAutoRegressive1Prior
+from .distributions import KLCost_GaussianGaussianProcessSampled
 
-from utils import init_linear, linear, list_t_bxn_to_tensor_bxtxn, write_data
-from utils import log_sum_exp, flatten
-from plot_lfads import plot_lfads
-import pdb
+from .utils import init_linear, linear, list_t_bxn_to_tensor_bxtxn, write_data
+from .utils import log_sum_exp, flatten
+# from plot_lfads import plot_lfads
+# import pdb
 
 class GRU(object):
   """Gated Recurrent Unit cell (cf. http://arxiv.org/abs/1406.1078).
@@ -316,10 +316,10 @@ class LFADS(object):
         # Additionally, the data_dim will be inferred as well, allowing for a
         # single placeholder for all datasets, regardless of data dimension.
         if hps.output_dist == 'poisson': # Enforce correct dtype        
-            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.int64), "Data dtype must be int for poisson output distribution"
+            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.int32), "Data dtype must be int for poisson output distribution"
             data_dtype = tf.int32
         elif hps.output_dist == 'gaussian':
-            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.float64), "Data dtype must be float for gaussian output dsitribution"
+            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.float32), "Data dtype must be float for gaussian output dsitribution"
             data_dtype = tf.float32
         else:
             assert False, "NIY"
@@ -1183,85 +1183,85 @@ class LFADS(object):
           with open(csv_file, "a") as myfile:
             myfile.write(csv_outstr)
 
-    def plot_single_example(self, datasets):
-        """Plot an image relating to a randomly chosen, specific example.  We use
-        posterior sample and average by taking one example, and filling a whole
-        batch with that example, sample from the posterior, and then average the
-        quantities.
+    # def plot_single_example(self, datasets):
+    #     """Plot an image relating to a randomly chosen, specific example.  We use
+    #     posterior sample and average by taking one example, and filling a whole
+    #     batch with that example, sample from the posterior, and then average the
+    #     quantities.
 
-        """
-        hps = self.hps
-        all_data_names = datasets.keys()
-        # pdb.set_trace()
-        data_name = np.random.permutation(list(all_data_names))[0]
-        data_dict = datasets[data_name]
-        has_valid_set = True if data_dict['valid_data'] is not None else False
-        cf = 1.0                  # plotting concern
+    #     """
+    #     hps = self.hps
+    #     all_data_names = datasets.keys()
+    #     # pdb.set_trace()
+    #     data_name = np.random.permutation(list(all_data_names))[0]
+    #     data_dict = datasets[data_name]
+    #     has_valid_set = True if data_dict['valid_data'] is not None else False
+    #     cf = 1.0                  # plotting concern
 
-        # posterior sample and average here
-        E, _, _ = data_dict['train_data'].shape
-        eidx = np.random.choice(E)
-        example_idxs = eidx * np.ones(hps.batch_size, dtype=np.int32)
+    #     # posterior sample and average here
+    #     E, _, _ = data_dict['train_data'].shape
+    #     eidx = np.random.choice(E)
+    #     example_idxs = eidx * np.ones(hps.batch_size, dtype=np.int32)
 
-        train_data_bxtxd, train_ext_input_bxtxi = \
-            self.get_batch(data_dict['train_data'], data_dict['train_ext_input'],
-                           example_idxs=example_idxs)
+    #     train_data_bxtxd, train_ext_input_bxtxi = \
+    #         self.get_batch(data_dict['train_data'], data_dict['train_ext_input'],
+    #                        example_idxs=example_idxs)
 
-        truth_train_data_bxtxd = None
-        if 'train_truth' in data_dict and data_dict['train_truth'] is not None:
-          truth_train_data_bxtxd, _ = self.get_batch(data_dict['train_truth'],
-                                                     example_idxs=example_idxs)
-          cf = data_dict['conversion_factor']
+    #     truth_train_data_bxtxd = None
+    #     if 'train_truth' in data_dict and data_dict['train_truth'] is not None:
+    #       truth_train_data_bxtxd, _ = self.get_batch(data_dict['train_truth'],
+    #                                                  example_idxs=example_idxs)
+    #       cf = data_dict['conversion_factor']
 
-        # plotter does averaging
-        train_model_values = self.eval_model_runs_batch(data_name,
-                                                        train_data_bxtxd,
-                                                        train_ext_input_bxtxi,
-                                                        do_average_batch=False)
+    #     # plotter does averaging
+    #     train_model_values = self.eval_model_runs_batch(data_name,
+    #                                                     train_data_bxtxd,
+    #                                                     train_ext_input_bxtxi,
+    #                                                     do_average_batch=False)
 
-        train_step = train_model_values['train_steps']
-        feed_dict = self.build_feed_dict(data_name, train_data_bxtxd,
-                                         train_ext_input_bxtxi, keep_prob=1.0)
+    #     train_step = train_model_values['train_steps']
+    #     feed_dict = self.build_feed_dict(data_name, train_data_bxtxd,
+    #                                      train_ext_input_bxtxi, keep_prob=1.0)
 
-        session = tf.get_default_session()
-        generic_summ = session.run(self.merged_generic, feed_dict=feed_dict)
-        self.writer.add_summary(generic_summ, train_step)
+    #     session = tf.get_default_session()
+    #     generic_summ = session.run(self.merged_generic, feed_dict=feed_dict)
+    #     self.writer.add_summary(generic_summ, train_step)
 
-        valid_data_bxtxd = valid_model_values = valid_ext_input_bxtxi = None
-        truth_valid_data_bxtxd = None
-        if has_valid_set:
-          E, _, _ = data_dict['valid_data'].shape
-          eidx = np.random.choice(E)
-          example_idxs = eidx * np.ones(hps.batch_size, dtype=np.int32)
-          valid_data_bxtxd, valid_ext_input_bxtxi = \
-              self.get_batch(data_dict['valid_data'],
-                             data_dict['valid_ext_input'],
-                             example_idxs=example_idxs)
-          if 'valid_truth' in data_dict and data_dict['valid_truth'] is not None:
-            truth_valid_data_bxtxd, _ = self.get_batch(data_dict['valid_truth'],
-                                                       example_idxs=example_idxs)
-          else:
-            truth_valid_data_bxtxd = None
+    #     valid_data_bxtxd = valid_model_values = valid_ext_input_bxtxi = None
+    #     truth_valid_data_bxtxd = None
+    #     if has_valid_set:
+    #       E, _, _ = data_dict['valid_data'].shape
+    #       eidx = np.random.choice(E)
+    #       example_idxs = eidx * np.ones(hps.batch_size, dtype=np.int32)
+    #       valid_data_bxtxd, valid_ext_input_bxtxi = \
+    #           self.get_batch(data_dict['valid_data'],
+    #                          data_dict['valid_ext_input'],
+    #                          example_idxs=example_idxs)
+    #       if 'valid_truth' in data_dict and data_dict['valid_truth'] is not None:
+    #         truth_valid_data_bxtxd, _ = self.get_batch(data_dict['valid_truth'],
+    #                                                    example_idxs=example_idxs)
+    #       else:
+    #         truth_valid_data_bxtxd = None
 
-          # plotter does averaging
-          valid_model_values = self.eval_model_runs_batch(data_name,
-                                                          valid_data_bxtxd,
-                                                          valid_ext_input_bxtxi,
-                                                          do_average_batch=False)
+    #       # plotter does averaging
+    #       valid_model_values = self.eval_model_runs_batch(data_name,
+    #                                                       valid_data_bxtxd,
+    #                                                       valid_ext_input_bxtxi,
+    #                                                       do_average_batch=False)
 
-        example_image = plot_lfads(train_bxtxd=train_data_bxtxd,
-                                   train_model_vals=train_model_values,
-                                   train_ext_input_bxtxi=train_ext_input_bxtxi,
-                                   train_truth_bxtxd=truth_train_data_bxtxd,
-                                   valid_bxtxd=valid_data_bxtxd,
-                                   valid_model_vals=valid_model_values,
-                                   valid_ext_input_bxtxi=valid_ext_input_bxtxi,
-                                   valid_truth_bxtxd=truth_valid_data_bxtxd,
-                                   bidx=None, cf=cf, output_dist=hps.output_dist)
-        example_image = np.expand_dims(example_image, axis=0)
-        example_summ = session.run(self.merged_examples,
-                                   feed_dict={self.example_image : example_image})
-        self.writer.add_summary(example_summ)
+    #     example_image = plot_lfads(train_bxtxd=train_data_bxtxd,
+    #                                train_model_vals=train_model_values,
+    #                                train_ext_input_bxtxi=train_ext_input_bxtxi,
+    #                                train_truth_bxtxd=truth_train_data_bxtxd,
+    #                                valid_bxtxd=valid_data_bxtxd,
+    #                                valid_model_vals=valid_model_values,
+    #                                valid_ext_input_bxtxi=valid_ext_input_bxtxi,
+    #                                valid_truth_bxtxd=truth_valid_data_bxtxd,
+    #                                bidx=None, cf=cf, output_dist=hps.output_dist)
+    #     example_image = np.expand_dims(example_image, axis=0)
+    #     example_summ = session.run(self.merged_examples,
+    #                                feed_dict={self.example_image : example_image})
+    #     self.writer.add_summary(example_summ)
 
 
 

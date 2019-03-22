@@ -1,363 +1,1059 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from lfads import LFADS
 import numpy as np
-import os
-import tensorflow as tf
-import re
-import utils
-import sys
+from multiprocessing import Pool, cpu_count
+from scipy import stats, linalg
+import pandas as pd
+import neuroseries as nts
 
 
-def build_model(hps, kind="train", datasets=None):
-  """Builds a model from either random initialization, or saved parameters.
+def jPCA(data, times):
+	#PCA
+	from sklearn.decomposition import PCA
+	n 		= 6
+	pca 	= PCA(n_components = n)
+	zpca 	= pca.fit_transform(data)
+	pc 		= zpca[:,0:2]
+	eigen 	= pca.components_
+	phi 	= np.mod(np.arctan2(zpca[:,1], zpca[:,0]), 2*np.pi)
+	#jPCA
+	X 		= pca.components_.transpose()
+	dX 		= np.hstack([np.vstack(derivative(times, X[:,i])) for i in range(X.shape[1])])
+	#build the H mapping for a given n
+	# work by lines but H is made for column based
+	n 		= X.shape[1]
+	H 		= buildHMap(n)
+	# X tilde
+	Xtilde 	= np.zeros( (X.shape[0]*X.shape[1], X.shape[1]*X.shape[1]) )
+	for i, j in zip( (np.arange(0,n**2,n) ), np.arange(0, n*X.shape[0], X.shape[0]) ):
+		Xtilde[j:j+X.shape[0],i:i+X.shape[1]] = X
+	# put dx in columns
+	dXv 	= np.vstack(dX.transpose().reshape(X.shape[0]*X.shape[1]))
+	# multiply Xtilde by H
+	XtH 	= np.dot(Xtilde, H)
+	# solve XtH k = dXv
+	k, residuals, rank, s = np.linalg.lstsq(XtH, dXv)
+	# multiply by H to get m then M
+	m 		= np.dot(H, k)
+	Mskew = m.reshape(n,n).transpose()
+	# Contruct the two vectors for projection with MSKEW
+	evalues, evectors = np.linalg.eig(Mskew)
+	# index = np.argsort(evalues).reshape(5,2)[:,1]
+	index 	= np.argsort(np.array([np.linalg.norm(i) for i in evalues]).reshape(int(n/2),2)[:,0])
+	evectors = evectors.transpose().reshape(int(n/2),2,n)
+	u 		= np.vstack([
+					np.real(evectors[index[-1]][0] + evectors[index[-1]][1]),
+					np.imag(evectors[index[-1]][0] - evectors[index[-1]][1])
+				]).transpose()
+	# PRoject X
+	rX 		= np.dot(X, u)
+	rX 		= rX*-1.0
+	score 	= np.dot(data, rX)
+	phi2 	= np.mod(np.arctan2(score[:,1], score[:,0]), 2*np.pi)
+	# Construct the two vectors for projection with MSYM
+	Msym 	= np.copy(Mskew)
+	Msym[np.triu_indices(n)] *= -1.0
+	evalues2, evectors2 = np.linalg.eig(Msym)
+	v 		= evectors2[:,0:2]
+	rY 		= np.dot(X, v)
+	score2 	= np.dot(data, rY)
+	phi3 	= np.mod(np.arctan2(score2[:,1], score2[:,0]), 2*np.pi)
+	dynamical_system = {	'x'		:	X,
+							'dx'	:	dX,
+							'Mskew'	:	Mskew,
+							'Msym'	:	Msym,
+														}
+	return (rX, phi2, dynamical_system)
 
-  Args:
-    hps: The hyper parameters for the model.
-    kind: (optional) The kind of model to build.  Training vs inference require
-      different graphs.
-    datasets: The datasets structure (see top of lfads.py).
+def gaussFilt(X, wdim = (1,)):
+	'''
+		Gaussian Filtering in 1 or 2d.		
+		Made to fit matlab
+	'''
+	from scipy.signal import gaussian
 
-  Returns:
-    an LFADS model.
-  """
+	if len(wdim) == 1:
+		from scipy.ndimage.filters import convolve1d
+		l1 = len(X)
+		N1 = wdim[0]*10
+		S1 = (N1-1)/float(2*5)
+		gw = gaussian(N1, S1)
+		gw = gw/gw.sum()
+		#convolution
+		if len(X.shape) == 2:
+			filtered_X = convolve1d(X, gw, axis = 1)
+		elif len(X.shape) == 1:
+			filtered_X = convolve1d(X, gw)
+		return filtered_X	
+	elif len(wdim) == 2:
+		from scipy.signal import convolve2d
+		def conv2(x, y, mode='same'):
+			return np.rot90(convolve2d(np.rot90(x, 2), np.rot90(y, 2), mode=mode), 2)			
 
-  build_kind = kind
-  if build_kind == "write_model_params":
-    build_kind = "train"
-  with tf.variable_scope("LFADS", reuse=None):
-    model = LFADS(hps, kind=build_kind, datasets=datasets)
+		l1, l2 = X.shape
+		N1, N2 = wdim		
+		# create bordered matrix
+		Xf = np.flipud(X)
+		bordered_X = np.vstack([
+				np.hstack([
+					np.fliplr(Xf),Xf,np.fliplr(Xf)
+				]),
+				np.hstack([
+					np.fliplr(X),X,np.fliplr(X)
+				]),
+				np.hstack([
+					np.fliplr(Xf),Xf,np.fliplr(Xf)
+				]),
+			])
+		# gaussian windows
+		N1 = N1*10
+		N2 = N2*10
+		S1 = (N1-1)/float(2*5)
+		S2 = (N2-1)/float(2*5)
+		gw = np.vstack(gaussian(N1,S1))*gaussian(N2,S2)
+		gw = gw/gw.sum()
+		# convolution
+		filtered_X = conv2(bordered_X, gw, mode ='same')
+		return filtered_X[l1:l1+l1,l2:l2+l2]
+	else :
+		print("Error, dimensions larger than 2")
+		return
 
-  if not os.path.exists(hps.lfads_save_dir):
-    print("Save directory %s does not exist, creating it." % hps.lfads_save_dir)
-    os.makedirs(hps.lfads_save_dir)
+def derivative(x, f):
+	''' 
+		Compute the derivative of a time serie
+		Used for jPCA
+	'''
+	from scipy.stats import linregress
+	fish = np.zeros(len(f))
+	slopes_ = []
+	tmpf = np.hstack((f[0],f,f[-1])) # not circular
+	binsize = x[1]-x[0]	
+	tmpx = np.hstack((np.array([x[0]-binsize]),x,np.array([x[-1]+binsize])))	
+	# plot(tmpx, tmpf, 'o')
+	# plot(x, f, '+')
+	for i in range(len(f)):
+		slope, intercept, r_value, p_value, std_err = linregress(tmpx[i:i+3], tmpf[i:i+3])
+		slopes_.append(slope)	
+		# plot(tmpx[i:i+3], tmpx[i:i+3]*slope+intercept, '-')
+	return np.array(slopes_)/binsize
 
-  cp_pb_ln = hps.checkpoint_pb_load_name
-  cp_pb_ln = 'checkpoint' if cp_pb_ln == "" else cp_pb_ln
-  if cp_pb_ln == 'checkpoint':
-    print("Loading latest training checkpoint in: ", hps.lfads_save_dir)
-    saver = model.seso_saver
-  elif cp_pb_ln == 'checkpoint_lve':
-    print("Loading lowest validation checkpoint in: ", hps.lfads_save_dir)
-    saver = model.lve_saver
-  else:
-    print("Loading checkpoint: ", cp_pb_ln, ", in: ", hps.lfads_save_dir)
-    saver = model.seso_saver
+def buildHMap(n, ):
+	'''
+		build the H mapping for a given n
+		used for the jPCA
+	'''
+	from scipy.sparse import lil_matrix
+	M = np.zeros((n,n), dtype = np.int)
+	M[np.triu_indices(n,1)] = np.arange(1,int(n*(n-1)/2)+1)
+	M = M - M.transpose()
+	m = np.vstack(M.reshape(n*n))
+	k = np.vstack(M[np.triu_indices(n,1)]).astype('int')
+	H = lil_matrix( (len(m), len(k)), dtype = np.float16)
+	H = np.zeros( (len(m), len(k) ))
+	# first column 
+	for i in k.flatten():
+		# positive
+		H[np.where(m == i)[0][0],i-1] = 1.0
+		# negative
+		H[np.where(m == -i)[0][0],i-1] = -1.0
+	return H
 
-  ckpt = tf.train.get_checkpoint_state(hps.lfads_save_dir,
-                                       latest_filename=cp_pb_ln)
+def crossValidation(data, times, n_cv = 10, dims = (6,2)):
+	''' 
+		Perform a randomized cross-validation 
+		of PCA -> jPCA
+		dims = (dimension reduction of pca, dimension reduction of jpca)
+	'''
+	from sklearn.model_selection import KFold
+	from sklearn.decomposition import PCA
+	cv_kf = KFold(n_splits = n_cv, shuffle = True, random_state=42)
+	skf = cv_kf.split(data)
+	scorecv = np.zeros( (data.shape[0],2) )
+	phicv = np.zeros(data.shape[0])
+	n = dims[0]
+	for idx_r, idx_t in skf:
+		Xtrain = data[idx_r, :]
+		Xtest  = data[idx_t, :]		
+		pca = PCA(n_components = n)
+		zpca = pca.fit_transform(Xtrain)
+		X = pca.components_.transpose()
+		dX = np.hstack([np.vstack(derivative(times, X[:,i])) for i in range(X.shape[1])])
+		#build the H mapping for a given n
+		# work by lines but H is made for column based
+		n = X.shape[1]
+		H = buildHMap(n)
+		# X tilde
+		Xtilde = np.zeros( (X.shape[0]*X.shape[1], X.shape[1]*X.shape[1]) )
+		for i, j in zip( (np.arange(0,n**2,n) ), np.arange(0, n*X.shape[0], X.shape[0]) ):
+			Xtilde[j:j+X.shape[0],i:i+X.shape[1]] = X
+		# put dx in columns
+		dXv = np.vstack(dX.transpose().reshape(X.shape[0]*X.shape[1]))
+		# multiply Xtilde by H
+		XtH = np.dot(Xtilde, H)
+		# solve XtH k = dXv
+		k, residuals, rank, s = np.linalg.lstsq(XtH, dXv)
+		# multiply by H to get m then M
+		m = np.dot(H, k)
+		Mskew = m.reshape(n,n).transpose()
+		# Contruct the two vectors for projection with MSKEW
+		evalues, evectors = np.linalg.eig(Mskew)
+		# index = np.argsort(evalues).reshape(5,2)[:,1]
+		index = np.argsort(np.array([np.linalg.norm(i) for i in evalues]).reshape(int(n/2),2)[:,0])
+		evectors = evectors.transpose().reshape(int(n/2),2,n)
+		u = np.vstack([
+						np.real(evectors[index[-1]][0] + evectors[index[-1]][1]),
+						np.imag(evectors[index[-1]][0] - evectors[index[-1]][1])
+					]).transpose()
+		# PRoject X
+		rX = np.dot(X, u)
+		score = np.dot(Xtest, rX)
+		phi = np.mod(np.arctan2(score[:,0], score[:,1]), 2*np.pi)
+		scorecv[idx_t,:] = score
+		phicv[idx_t] = phi
 
-  session = tf.get_default_session()
-  print("ckpt: ", ckpt)
-  if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
-    print("Reading model parameters from %s" % ckpt.model_checkpoint_path)
-    saver.restore(session, ckpt.model_checkpoint_path)
-  else:
-    print("Created model with fresh parameters.")
-    if kind in ["posterior_sample_and_average", "posterior_push_mean",
-                "prior_sample", "write_model_params"]:
-      print("Possible error!!! You are running ", kind, " on a newly \
-      initialized model!")
-      # cannot print ckpt.model_check_point path if no ckpt
-      print("Are you sure you sure a checkpoint in ", hps.lfads_save_dir,
-            " exists?")
+	return np.array(scorecv), np.array(phicv)
 
-    tf.global_variables_initializer().run()
+def quartiles(data, times, n_fold = 4, dims = (6,2)):
+	''' 		
+		PCA -> jPCA
+		dims = (dimension reduction of pca, dimension reduction of jpca)
+	'''	
+	from sklearn.decomposition import PCA
+	indexdata = np.linspace(0,len(data),n_fold+1).astype('int')	
+	scorecv = []
+	phicv = []
+	n = dims[0]
+	jpca = []
+	for i in range(n_fold):
+		Xtrain = data[indexdata[i]:indexdata[i+1], :]		
+		pca = PCA(n_components = n)
+		zpca = pca.fit_transform(Xtrain)
+		X = pca.components_.transpose()
+		dX = np.hstack([np.vstack(derivative(times, X[:,i])) for i in range(X.shape[1])])
+		#build the H mapping for a given n
+		# work by lines but H is made for column based
+		n = X.shape[1]
+		H = buildHMap(n)
+		# X tilde
+		Xtilde = np.zeros( (X.shape[0]*X.shape[1], X.shape[1]*X.shape[1]) )
+		for i, j in zip( (np.arange(0,n**2,n) ), np.arange(0, n*X.shape[0], X.shape[0]) ):
+			Xtilde[j:j+X.shape[0],i:i+X.shape[1]] = X
+		# put dx in columns
+		dXv = np.vstack(dX.transpose().reshape(X.shape[0]*X.shape[1]))
+		# multiply Xtilde by H
+		XtH = np.dot(Xtilde, H)
+		# solve XtH k = dXv
+		k, residuals, rank, s = np.linalg.lstsq(XtH, dXv)
+		# multiply by H to get m then M
+		m = np.dot(H, k)
+		Mskew = m.reshape(n,n).transpose()
+		# Contruct the two vectors for projection with MSKEW
+		evalues, evectors = np.linalg.eig(Mskew)
+		# index = np.argsort(evalues).reshape(5,2)[:,1]
+		index = np.argsort(np.array([np.linalg.norm(i) for i in evalues]).reshape(int(n/2),2)[:,0])
+		evectors = evectors.transpose().reshape(int(n/2),2,n)
+		u = np.vstack([
+						np.real(evectors[index[-1]][0] + evectors[index[-1]][1]),
+						np.imag(evectors[index[-1]][0] - evectors[index[-1]][1])
+					]).transpose()
+		# PRoject X
+		rX = np.dot(X, u)
+		score = np.dot(Xtrain, rX)
+		phi = np.mod(np.arctan2(score[:,1], score[:,0]), 2*np.pi)
+		scorecv.append(score)
+		phicv.append(phi)
+		jpca.append(rX)
 
-  if ckpt:
-    train_step_str = re.search('-[0-9]+$', ckpt.model_checkpoint_path).group()
-  else:
-    train_step_str = '-0'
+	index = np.array([np.arange(indexdata[i],indexdata[i+1]) for i in range(len(indexdata)-1)])
+	return np.array(scorecv), np.array(phicv), index, np.array(jpca)
 
-  fname = 'hyperparameters' + train_step_str + '.txt'
-  hp_fname = os.path.join(hps.lfads_save_dir, fname)
-  hps_for_saving = jsonify_dict(hps)
-  utils.write_data(hp_fname, hps_for_saving, use_json=True)
+def downsample(tsd, up, down):
+	import scipy.signal
+	import neuroseries as nts
+	dtsd = scipy.signal.resample_poly(tsd.values, up, down)
+	dt = tsd.as_units('s').index.values[np.arange(0, tsd.shape[0], down)]
+	if len(tsd.shape) == 1:		
+		return nts.Tsd(dt, dtsd, time_units = 's')
+	elif len(tsd.shape) == 2:
+		return nts.TsdFrame(dt, dtsd, time_units = 's', columns = list(tsd.columns))
 
-  return model
+def getPhase(lfp, fmin, fmax, nbins, fsamp, power = False):
+	""" Continuous Wavelets Transform
+		return phase of lfp in a Tsd array
+	"""
+	import neuroseries as nts
+	from Wavelets import MyMorlet as Morlet
+	if isinstance(lfp, nts.time_series.TsdFrame):
+		allphase 		= nts.TsdFrame(lfp.index.values, np.zeros(lfp.shape))
+		allpwr 			= nts.TsdFrame(lfp.index.values, np.zeros(lfp.shape))
+		for i in lfp.keys():
+			allphase[i], allpwr[i] = getPhase(lfp[i], fmin, fmax, nbins, fsamp, power = True)
+		if power:
+			return allphase, allpwr
+		else:
+			return allphase			
 
+	elif isinstance(lfp, nts.time_series.Tsd):
+		cw 				= Morlet(lfp.values, fmin, fmax, nbins, fsamp)
+		cwt 			= cw.getdata()
+		cwt 			= np.flip(cwt, axis = 0)
+		wave 			= np.abs(cwt)**2.0
+		phases 			= np.arctan2(np.imag(cwt), np.real(cwt)).transpose()	
+		cwt 			= None
+		index 			= np.argmax(wave, 0)
+		# memory problem here, need to loop
+		phase 			= np.zeros(len(index))	
+		for i in range(len(index)) : phase[i] = phases[i,index[i]]
+		phases 			= None
+		if power: 
+			pwrs 		= cw.getpower()		
+			pwr 		= np.zeros(len(index))		
+			for i in range(len(index)):
+				pwr[i] = pwrs[index[i],i]	
+			return nts.Tsd(lfp.index.values, phase), nts.Tsd(lfp.index.values, pwr)
+		else:
+			return nts.Tsd(lfp.index.values, phase)
 
-def jsonify_dict(d):
-  """Turns python booleans into strings so hps dict can be written in json.
-  Creates a shallow-copied dictionary first, then accomplishes string
-  conversion.
+def getPeaksandTroughs(lfp, min_points):
+	"""	 
+		At 250Hz (1250/5), 2 troughs cannont be closer than 20 (min_points) points (if theta reaches 12Hz);		
+	"""
+	import neuroseries as nts
+	import scipy.signal
+	if isinstance(lfp, nts.time_series.Tsd):
+		troughs 		= nts.Tsd(lfp.as_series().iloc[scipy.signal.argrelmin(lfp.values, order =min_points)[0]], time_units = 'us')
+		peaks 			= nts.Tsd(lfp.as_series().iloc[scipy.signal.argrelmax(lfp.values, order =min_points)[0]], time_units = 'us')
+		tmp 			= nts.Tsd(troughs.realign(peaks, align = 'next').as_series().drop_duplicates('first')) # eliminate double peaks
+		peaks			= peaks[tmp.index]
+		tmp 			= nts.Tsd(peaks.realign(troughs, align = 'prev').as_series().drop_duplicates('first')) # eliminate double troughs
+		troughs 		= troughs[tmp.index]
+		return (peaks, troughs)
+	elif isinstance(lfp, nts.time_series.TsdFrame):
+		peaks 			= nts.TsdFrame(lfp.index.values, np.zeros(lfp.shape))
+		troughs			= nts.TsdFrame(lfp.index.values, np.zeros(lfp.shape))
+		for i in lfp.keys():
+			peaks[i], troughs[i] = getPeaksandTroughs(lfp[i], min_points)
+		return (peaks, troughs)
 
-  Args:
-    d: hyperparameter dictionary
+def getCircularMean(theta, high = np.pi, low = -np.pi):
+	""" 
+	see CircularMean.m in TSToolbox_Utils/Stats/CircularMean.m
+	or Fisher N.I. Analysis of Circular Data p. 30-35
+	"""
+	from scipy.stats import circmean
+	n 			= float(len(theta))
+	alpha 		= 0.05	
+	S 			= np.sum(np.sin(theta))
+	C 			= np.sum(np.cos(theta))
+	mu 			= circmean(theta, high, low)
+	Rmean		= np.sqrt(S**2.0 + C**2.0) / n
+	rho2 		= np.sum(np.cos(2*(theta - mu)))/n
+	delta		= (1 - rho2) / (2* Rmean**2)
+	sigma		= np.sqrt(-2.0*np.log(Rmean))
+	Z 			= n * Rmean**2.0
+	pval 		= np.exp(-Z)*(1+(2*Z-Z**2.0)/(4*n) - (24*Z - 132*Z**2.0 + 76*Z**3.0 - 9*Z**4.0)/(288.0*n**2.0))
+	if Rmean < 0.5:
+		Kappa 	= 2.0*Rmean + Rmean**3.0 + 5*(Rmean**5.0)/6.0
+	elif Rmean >= 0.53 and Rmean < 0.85:
+		Kappa 	= -0.4 + 1.39*Rmean + 0.43/(1-Rmean)
+	else:
+		Kappa 	= 1/(Rmean**3.0 - 4*Rmean**2.0 + 3*Rmean)
+	if n < 15:
+		if Kappa < 2:
+			Kappa = np.max([Kappa-2/(n*Kappa),0])
+		else:
+			Kappa = (((n-1)**3) * Kappa)/(n**3 + n)
+	return (mu, Kappa, pval)
 
-  Returns: hyperparameter dictionary with bool's as strings
-  """
+def butter_bandpass(lowcut, highcut, fs, order=5):
+	from scipy.signal import butter
+	nyq = 0.5 * fs
+	low = lowcut / nyq
+	high = highcut / nyq
+	b, a = butter(order, [low, high], btype='band')
+	return b, a
 
-  d2 = d.copy()   # shallow copy is fine by assumption of d being shallow
-  def jsonify_bool(boolean_value):
-    if boolean_value:
-      return "true"
-    else:
-      return "false"
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
+	from scipy.signal import lfilter
+	b, a = butter_bandpass(lowcut, highcut, fs, order=order)
+	y = lfilter(b, a, data)
+	return y
 
-  for key in d2.keys():
-    if isinstance(d2[key], bool):
-      d2[key] = jsonify_bool(d2[key])
-  return d2
+def getFiringRate(tsd_spike, bins):
+	"""bins shoud be in us
+	"""
+	import neuroseries as nts
+	frate 		= nts.Tsd(bins, np.zeros(len(bins)))
+	bins_size 	= (bins[1] - bins[0])*1.e-6 # convert to s for Hz
+	if type(tsd_spike) is dict:
+		for n in tsd_spike.keys():
+			index = np.digitize(tsd_spike[n].index.values, bins)
+			for i in index:
+				frate[bins[i]] += 1.0
+		frate = nts.Tsd(bins+(bins[1]-bins[0])/2, frate.values/len(tsd_spike)/bins_size)
+		return frate
+	else:
+		index 	= np.digitize(tsd_spike.index.values, bins)
+		for i in index:
+			frate[bins[i]] += 1.0
+		frate = nts.Tsd(bins+(bins[1]-bins[0])/2, frate.values/bins_size)
+		return frate	
 
+def computePhaseModulation(phase, spikes, ep, get_phase = False):
+	n_neuron 		= len(spikes)
+	spikes_evt		= {n:spikes[n].restrict(ep) for n in spikes.keys()}
+	spikes_phase	= {n:phase.realign(spikes_evt[n], align = 'closest') for n in spikes_evt.keys()}
+	evt_mod 		= np.ones((n_neuron,3))*np.nan	
+	for n in range(len(spikes_phase.keys())):
+		neuron = list(spikes_phase.keys())[n]
+		ph = spikes_phase[neuron]
+		mu, kappa, pval = getCircularMean(ph.values)
+		evt_mod[n] = np.array([mu, pval, kappa])
+	if get_phase:
+		return evt_mod, spikes_phase
+	else:
+		return evt_mod
+	
+def getPhaseCoherence(phase):
+	r = np.sqrt(np.sum([np.power(np.sum(np.cos(phase)),2), np.power(np.sum(np.sin(phase)),2)]))/len(phase)	
+	return r
 
-def build_hyperparameter_dict(flags):
-  """Simple script for saving hyper parameters.  Under the hood the
-  flags structure isn't a dictionary, so it has to be simplified since we
-  want to be able to view file as text.
+def computeBurstiness(spikes, epoch, start = 2.0, stop = 8.0):
+	s = spikes.restrict(epoch)
+	dt = np.diff(s.as_units('ms').index.values)
+	Nobs = float(np.logical_and(dt>start, dt<stop).sum())
+	r = len(s)/epoch.tot_length('s')
+	Nthe = len(dt)*(np.exp(-r*(start/1000)) - np.exp(-r*(stop/1000)))
+	return Nobs/(Nthe+1.0)
 
-  Args:
-    flags: From tf.app.flags
+#########################################################
+# INTERPOLATION
+#########################################################
+def interpolate(z, x, y, inter, bbox = None):	
+	import scipy.interpolate
+	xnew = np.arange(x.min(), x.max()+inter, inter)
+	ynew = np.arange(y.min(), y.max()+inter, inter)
+	if bbox == None:
+		f = scipy.interpolate.RectBivariateSpline(y, x, z)
+	else:
+		f = scipy.interpolate.RectBivariateSpline(y, x, z, bbox = bbox)
+	znew = f(ynew, xnew)
+	return (xnew, ynew, znew)
 
-  Returns:
-    dictionary of hyper parameters (ignoring other flag types).
-  """
-  d = {}
-  # Data
-  d['output_dist'] = flags.output_dist
-  d['data_dir'] = flags.data_dir
-  d['lfads_save_dir'] = flags.lfads_save_dir
-  d['checkpoint_pb_load_name'] = flags.checkpoint_pb_load_name
-  d['checkpoint_name'] = flags.checkpoint_name
-  d['output_filename_stem'] = flags.output_filename_stem
-  d['max_ckpt_to_keep'] = flags.max_ckpt_to_keep
-  d['max_ckpt_to_keep_lve'] = flags.max_ckpt_to_keep_lve
-  d['ps_nexamples_to_process'] = flags.ps_nexamples_to_process
-  d['ext_input_dim'] = flags.ext_input_dim
-  d['data_filename_stem'] = flags.data_filename_stem
-  d['device'] = flags.device
-  d['csv_log'] = flags.csv_log
-  d['num_steps_for_gen_ic'] = flags.num_steps_for_gen_ic
-  d['inject_ext_input_to_gen'] = flags.inject_ext_input_to_gen
-  # Cell
-  d['cell_weight_scale'] = flags.cell_weight_scale
-  # Generation
-  d['ic_dim'] = flags.ic_dim
-  d['factors_dim'] = flags.factors_dim
-  d['ic_enc_dim'] = flags.ic_enc_dim
-  d['gen_dim'] = flags.gen_dim
-  d['gen_cell_input_weight_scale'] = flags.gen_cell_input_weight_scale
-  d['gen_cell_rec_weight_scale'] = flags.gen_cell_rec_weight_scale
-  # KL distributions
-  d['ic_prior_var_min'] = flags.ic_prior_var_min
-  d['ic_prior_var_scale'] = flags.ic_prior_var_scale
-  d['ic_prior_var_max'] = flags.ic_prior_var_max
-  d['ic_post_var_min'] = flags.ic_post_var_min
-  d['co_prior_var_scale'] = flags.co_prior_var_scale
-  d['prior_ar_atau'] = flags.prior_ar_atau
-  d['prior_ar_nvar'] =  flags.prior_ar_nvar
-  d['do_train_prior_ar_atau'] = flags.do_train_prior_ar_atau
-  d['do_train_prior_ar_nvar'] = flags.do_train_prior_ar_nvar
-  # Controller
-  d['do_causal_controller'] = flags.do_causal_controller
-  d['controller_input_lag'] = flags.controller_input_lag
-  d['do_feed_factors_to_controller'] = flags.do_feed_factors_to_controller
-  d['feedback_factors_or_rates'] = flags.feedback_factors_or_rates
-  d['co_dim'] = flags.co_dim
-  d['ci_enc_dim'] = flags.ci_enc_dim
-  d['con_dim'] = flags.con_dim
-  d['co_mean_corr_scale'] = flags.co_mean_corr_scale
-  # Optimization
-  d['batch_size'] = flags.batch_size
-  d['learning_rate_init'] = flags.learning_rate_init
-  d['learning_rate_decay_factor'] = flags.learning_rate_decay_factor
-  d['learning_rate_stop'] = flags.learning_rate_stop
-  d['learning_rate_n_to_compare'] = flags.learning_rate_n_to_compare
-  d['max_grad_norm'] = flags.max_grad_norm
-  d['cell_clip_value'] = flags.cell_clip_value
-  d['do_train_io_only'] = flags.do_train_io_only
-  d['do_train_encoder_only'] = flags.do_train_encoder_only
-  d['do_reset_learning_rate'] = flags.do_reset_learning_rate
-  d['do_train_readin'] = flags.do_train_readin
+def filter_(z, n):
+	from scipy.ndimage import gaussian_filter	
+	return gaussian_filter(z, n)
 
-  # Overfitting
-  d['keep_prob'] = flags.keep_prob
-  d['temporal_spike_jitter_width'] = flags.temporal_spike_jitter_width
-  d['l2_gen_scale'] = flags.l2_gen_scale
-  d['l2_con_scale'] = flags.l2_con_scale
-  # Underfitting
-  d['kl_ic_weight'] = flags.kl_ic_weight
-  d['kl_co_weight'] = flags.kl_co_weight
-  d['kl_start_step'] = flags.kl_start_step
-  d['kl_increase_steps'] = flags.kl_increase_steps
-  d['l2_start_step'] = flags.l2_start_step
-  d['l2_increase_steps'] = flags.l2_increase_steps
+def softmax(x, b1 = 20.0, b2 = 0.5):
+	# x -= x.min()
+	# x /= x.max()
+	# return 0.75*(1.0/(1.0+np.exp(-(x-b2)*b1)))+0.25
+	return 1.0/(1.0+np.exp(-(x-b2)*b1))
 
-  return d
+def get_rgb(mapH, mapS, mapV, bound):
+	from matplotlib.colors import hsv_to_rgb	
+	"""
+		1. convert mapH to x between -1 and 1
+		2. get y value between 0 and 1 -> mapV
+		3. rescale mapH between 0 and 0.6
+		4. normalize mapS
+	"""		
+	# x = mapH.copy() * 2.0
+	# x = x - 1.0
+	# y = 1.0 - 0.4*x**6.0
+	# mapV = y.copy()
+	H 	= (1-mapH)*bound
+	S 	= mapS	
+	V 	= mapV
+	HSV = np.dstack((H,S,V))	
+	RGB = hsv_to_rgb(HSV)	
+	return RGB
 
+def rotateImage(image, angle):
+	import cv2
+	row,col = image.shape
+	center=tuple(np.array([row,col])/2)
+	rot_mat = cv2.getRotationMatrix2D(center,angle,1.0)
+	new_image = cv2.warpAffine(image, rot_mat, (col,row))
+	return new_image
 
-class hps_dict_to_obj(dict):
-  """Helper class allowing us to access hps dictionary more easily."""
+def getRotationMatrix(shape, angle):
+	import cv2
+	row,col = shape
+	center=tuple(np.array([row,col])/2)
+	rot_mat = cv2.getRotationMatrix2D(center,angle,1.0)
+	return rot_mat
 
-  def __getattr__(self, key):
-    if key in self:
-      return self[key]
-    else:
-      assert False, ("%s does not exist." % key)
-  def __setattr__(self, key, value):
-    self[key] = value
-
-
-def train(hps, datasets):
-  """Train the LFADS model.
-
-  Args:
-    hps: The dictionary of hyperparameters.
-    datasets: A dictionary of data dictionaries.  The dataset dict is simply a
-      name(string)-> data dictionary mapping (See top of lfads.py).
-  """
-  model = build_model(hps, kind="train", datasets=datasets)
-  if hps.do_reset_learning_rate:
-    sess = tf.get_default_session()
-    sess.run(model.learning_rate.initializer)
-
-  model.train_model(datasets)
-
-
-def write_model_runs(hps, datasets, output_fname=None, push_mean=False):
-  """Run the model on the data in data_dict, and save the computed values.
-
-  LFADS generates a number of outputs for each examples, and these are all
-  saved.  They are:
-    The mean and variance of the prior of g0.
-    The mean and variance of approximate posterior of g0.
-    The control inputs (if enabled)
-    The initial conditions, g0, for all examples.
-    The generator states for all time.
-    The factors for all time.
-    The rates for all time.
-
-  Args:
-    hps: The dictionary of hyperparameters.
-    datasets: A dictionary of data dictionaries.  The dataset dict is simply a
-      name(string)-> data dictionary mapping (See top of lfads.py).
-    output_fname (optional): output filename stem to write the model runs.
-    push_mean: if False (default), generates batch_size samples for each trial
-      and averages the results. if True, runs each trial once without noise,
-      pushing the posterior mean initial conditions and control inputs through
-      the trained model. False is used for posterior_sample_and_average, True
-      is used for posterior_push_mean.
-  """
-  model = build_model(hps, kind=hps.kind, datasets=datasets)
-  model.write_model_runs(datasets, output_fname, push_mean)
-
-
-def write_model_samples(hps, datasets, dataset_name=None, output_fname=None):
-  """Use the prior distribution to generate samples from the model.
-  Generates batch_size number of samples (set through FLAGS).
-
-  LFADS generates a number of outputs for each examples, and these are all
-  saved.  They are:
-    The mean and variance of the prior of g0.
-    The control inputs (if enabled)
-    The initial conditions, g0, for all examples.
-    The generator states for all time.
-    The factors for all time.
-    The output distribution parameters (e.g. rates) for all time.
-
-  Args:
-    hps: The dictionary of hyperparameters.
-    datasets: A dictionary of data dictionaries.  The dataset dict is simply a
-      name(string)-> data dictionary mapping (See top of lfads.py).
-    dataset_name: The name of the dataset to grab the factors -> rates
-      alignment matrices from. Only a concern with models trained on
-      multi-session data. By default, uses the first dataset in the data dict.
-    output_fname: The name prefix of the file in which to save the generated
-      samples.
-  """
-  if not output_fname:
-    output_fname = "model_runs_" + hps.kind
-  else:
-    output_fname = output_fname + "model_runs_" + hps.kind
-  if not dataset_name:
-    dataset_name = datasets.keys()[0]
-  else:
-    if dataset_name not in datasets.keys():
-      raise ValueError("Invalid dataset name '%s'."%(dataset_name))
-  model = build_model(hps, kind=hps.kind, datasets=datasets)
-  model.write_model_samples(dataset_name, output_fname)
-
-
-def write_model_parameters(hps, output_fname=None, datasets=None):
-  """Save all the model parameters
-
-  Save all the parameters to hps.lfads_save_dir.
-
-  Args:
-    hps: The dictionary of hyperparameters.
-    output_fname: The prefix of the file in which to save the generated
-      samples.
-    datasets: A dictionary of data dictionaries.  The dataset dict is simply a
-      name(string)-> data dictionary mapping (See top of lfads.py).
-  """
-  if not output_fname:
-    output_fname = "model_params"
-  else:
-    output_fname = output_fname + "_model_params"
-  fname = os.path.join(hps.lfads_save_dir, output_fname)
-  print("Writing model parameters to: ", fname)
-  # save the optimizer params as well
-  model = build_model(hps, kind="write_model_params", datasets=datasets)
-  model_params = model.eval_model_parameters(use_nested=False,
-                                             include_strs="LFADS")
-  utils.write_data(fname, model_params, compression=None)
-  print("Done.")
+def getXYshapeofRotatedMatrix(x, y, angle):	
+	return (x * np.cos(angle * np.pi /180.) + y * np.sin(angle * np.pi / 180.),
+			y * np.cos(angle * np.pi /180.) + x * np.sin(angle * np.pi / 180.)			)
 
 
-def clean_data_dict(data_dict):
-  """Add some key/value pairs to the data dict, if they are missing.
-  Args:
-    data_dict - dictionary containing data for LFADS
-  Returns:
-    data_dict with some keys filled in, if they are absent.
-  """
+#########################################################
+# CORRELATION
+#########################################################
+def crossCorr(t1, t2, binsize, nbins):
+	''' 
+		Fast crossCorr 
+	'''
+	nt1 = len(t1)
+	nt2 = len(t2)
+	if np.floor(nbins/2)*2 == nbins:
+		nbins = nbins+1
 
-  keys = ['train_truth', 'train_ext_input', 'valid_data',
-          'valid_truth', 'valid_ext_input', 'valid_train']
-  for k in keys:
-    if k not in data_dict:
-      data_dict[k] = None
+	m = -binsize*((nbins+1)/2)
+	B = np.zeros(nbins)
+	for j in range(nbins):
+		B[j] = m+j*binsize
 
-  return data_dict
+	w = ((nbins/2) * binsize)
+	C = np.zeros(nbins)
+	i2 = 1
+
+	for i1 in range(nt1):
+		lbound = t1[i1] - w
+		while i2 < nt2 and t2[i2] < lbound:
+			i2 = i2+1
+		while i2 > 1 and t2[i2-1] > lbound:
+			i2 = i2-1
+
+		rbound = lbound
+		l = i2
+		for j in range(nbins):
+			k = 0
+			rbound = rbound+binsize
+			while l < nt2 and t2[l] < rbound:
+				l = l+1
+				k = k+1
+
+			C[j] += k
+
+	# for j in range(nbins):
+	# C[j] = C[j] / (nt1 * binsize)
+	C = C/(nt1 * binsize/1000)
+
+	return C
+
+def crossCorr2(t1, t2, binsize, nbins):
+	'''
+		Slow crossCorr
+	'''
+	window = np.arange(-binsize*(nbins/2),binsize*(nbins/2)+2*binsize,binsize) - (binsize/2.)
+	allcount = np.zeros(nbins+1)
+	for e in t1:
+		mwind = window + e
+		# need to add a zero bin and an infinite bin in mwind
+		mwind = np.array([-1.0] + list(mwind) + [np.max([t1.max(),t2.max()])+binsize])	
+		index = np.digitize(t2, mwind)
+		# index larger than 2 and lower than mwind.shape[0]-1
+		# count each occurences 
+		count = np.array([np.sum(index == i) for i in range(2,mwind.shape[0]-1)])
+		allcount += np.array(count)
+	allcount = allcount/(float(len(t1))*binsize / 1000)
+	return allcount
+
+def xcrossCorr_slow(t1, t2, binsize, nbins, nbiter, jitter, confInt):		
+	times 			= np.arange(0, binsize*(nbins+1), binsize) - (nbins*binsize)/2
+	H0 				= crossCorr(t1, t2, binsize, nbins)	
+	H1 				= np.zeros((nbiter,nbins+1))
+	t2j	 			= t2 + 2*jitter*(np.random.rand(nbiter, len(t2)) - 0.5)
+	t2j 			= np.sort(t2j, 1)
+	for i in range(nbiter):			
+		H1[i] 		= crossCorr(t1, t2j[i], binsize, nbins)
+	Hm 				= H1.mean(0)
+	tmp 			= np.sort(H1, 0)
+	HeI 			= tmp[int((1-confInt)/2*nbiter),:]
+	HeS 			= tmp[int((confInt + (1-confInt)/2)*nbiter)]
+	Hstd 			= np.std(tmp, 0)
+
+	return (H0, Hm, HeI, HeS, Hstd, times)
+
+def xcrossCorr_fast(t1, t2, binsize, nbins, nbiter, jitter, confInt):		
+	times 			= np.arange(0, binsize*(nbins*2+1), binsize) - (nbins*2*binsize)/2
+	# need to do a cross-corr of double size to convolve after and avoid boundary effect
+	H0 				= crossCorr(t1, t2, binsize, nbins*2)	
+	window_size 	= 2*jitter//binsize
+	window 			= np.ones(int(window_size))*(1/window_size)
+	Hm 				= np.convolve(H0, window, 'same')
+	Hstd			= np.sqrt(np.var(Hm))	
+	HeI 			= np.NaN
+	HeS 			= np.NaN	
+	return (H0, Hm, HeI, HeS, Hstd, times)	
+
+def corr_circular_(alpha1, alpha2):
+	axis = None
+	from pycircstat import center
+	from scipy.stats import norm
+	alpha1_bar, alpha2_bar = center(alpha1, alpha2, axis=axis)
+	num = np.sum(np.sin(alpha1_bar) * np.sin(alpha2_bar), axis=axis)
+	den = np.sqrt(np.sum(np.sin(alpha1_bar) ** 2, axis=axis) * np.sum(np.sin(alpha2_bar) ** 2, axis=axis))
+	rho = num/den
+	# pvalue
+	l20 = np.mean(np.sin(alpha1 - alpha1_bar)**2)
+	l02 = np.mean(np.sin(alpha2 - alpha2_bar)**2)
+	l22 = np.mean((np.sin(alpha1-alpha1_bar)**2) * (np.sin(alpha2 - alpha2_bar)**2))
+	ts = np.sqrt((float(len(alpha1)) * l20 * l02)/l22) * rho
+	pval = 2.0 * (1.0 - norm.cdf(np.abs(ts)))
+
+	return rho, pval
+
+def autocorr(tsd):
+	import pandas as pd
+	# bin_size 	= 0.5 # ms 
+	# nb_bins 	= 1000
+	bin_size 	= 1
+	nb_bins 	= 10000	
+	# confInt 	= 0.95
+	# nb_iter 	= 1000
+	# jitter  	= 150 # ms					
+	# H0, Hm, HeI, HeS, Hstd, times = xcrossCorr_fast(tsd, tsd, bin_size, nb_bins, nb_iter, jitter, confInt)
+	C = crossCorr(tsd, tsd, bin_size, nb_bins)
+	times 		= np.arange(0, bin_size*(nb_bins+1), bin_size) - (nb_bins*bin_size)/2
+	return pd.Series(index = times, data = C)
+	# return (H0 - Hm)/Hstd
+
+#########################################################
+# WRAPPERS
+#########################################################
+def loadWaveforms(data_directory, datasets):
+	# load waveforms
+	import scipy.io	
+	to_return = pd.DataFrame()
+	for i in range(len(datasets)):
+		path = data_directory+datasets[i]
+		try:
+			data = scipy.io.loadmat(path+'/Analysis/SpikeWaveF.mat')
+			meanWaveF = data['meanWaveF'][0]
+			maxIx = data['maxIx'][0]
+			generalinfo 	= scipy.io.loadmat(path+'/Analysis/GeneralInfo.mat')
+			shankStructure 	= loadShankStructure(generalinfo)
+			spikes,shank = loadSpikeData(path+'/Analysis/SpikeData.mat', shankStructure['thalamus'])	
+			index_neurons = [path.split("/")[-1]+"_"+str(n) for n in spikes.keys()]
+			for i, n in zip(list(spikes.keys()), index_neurons):	
+				to_return[n] = meanWaveF[i][maxIx[i]-1]			
+		except:
+			print(datasets[i])
+			pass
+
+	return to_return
+
+def loadMappingNucleus(path):
+	import pandas as pd
+	tmp = open(path, 'r').readlines()
+	tmp = [x.strip() for x in tmp]
+	data = {}
+	table = []
+	name = tmp[0]	
+	for l in tmp[1:]:		
+		if 'Mouse' in l:
+			table = np.array(table)			
+			data[name] = pd.DataFrame(table)
+			table = []
+			name = l			
+		else:
+			table.append(l.split(" "))
+	data[name] = pd.DataFrame(np.array(table))
+	return data
+
+def loadShankStructure(generalinfo):
+	shankStructure = {}
+	for k,i in zip(generalinfo['shankStructure'][0][0][0][0],range(len(generalinfo['shankStructure'][0][0][0][0]))):
+		if len(generalinfo['shankStructure'][0][0][1][0][i]):
+			shankStructure[k[0]] = generalinfo['shankStructure'][0][0][1][0][i][0]-1
+		else :
+			shankStructure[k[0]] = []
+	
+	return shankStructure	
+
+def loadShankMapping(path):	
+	import scipy.io	
+	spikedata = scipy.io.loadmat(path)
+	shank = spikedata['shank'] -1
+	return shank
+
+def loadSpikeData(path, index):
+	# units shoud be the value to convert in s 
+	import scipy.io
+	import neuroseries as nts
+	spikedata = scipy.io.loadmat(path)
+	shank = spikedata['shank'] - 1
+	shankIndex = np.where(shank == index)[0]
+
+	spikes = {}	
+	for i in shankIndex:	
+		spikes[i] = nts.Ts(spikedata['S'][0][0][0][i][0][0][0][1][0][0][2], time_units = 's')
+
+	a = spikes[0].as_units('s').index.values	
+	if ((a[-1]-a[0])/60.)/60. > 20. : # VERY BAD		
+		spikes = {}	
+		for i in shankIndex:	
+			spikes[i] = nts.Ts(spikedata['S'][0][0][0][i][0][0][0][1][0][0][2]*0.0001, time_units = 's')
+
+	return spikes, shank
+
+def loadEpoch(path, epoch):
+	import scipy.io
+	import neuroseries as nts
+	sampling_freq = 1250	
+	behepochs = scipy.io.loadmat(path+'/Analysis/BehavEpochs.mat')
+
+	if epoch == 'wake':
+		wake_ep = np.hstack([behepochs['wakeEp'][0][0][1],behepochs['wakeEp'][0][0][2]])
+		return nts.IntervalSet(wake_ep[:,0], wake_ep[:,1], time_units = 's').drop_short_intervals(0.0)
+
+	elif epoch == 'sleep':
+		sleep_pre_ep, sleep_post_ep = [], []
+		if 'sleepPreEp' in behepochs.keys():
+			sleep_pre_ep = behepochs['sleepPreEp'][0][0]
+			sleep_pre_ep = np.hstack([sleep_pre_ep[1],sleep_pre_ep[2]])
+			sleep_pre_ep_index = behepochs['sleepPreEpIx'][0]
+		if 'sleepPostEp' in behepochs.keys():
+			sleep_post_ep = behepochs['sleepPostEp'][0][0]
+			sleep_post_ep = np.hstack([sleep_post_ep[1],sleep_post_ep[2]])
+			sleep_post_ep_index = behepochs['sleepPostEpIx'][0]
+		if len(sleep_pre_ep) and len(sleep_post_ep):
+			sleep_ep = np.vstack((sleep_pre_ep, sleep_post_ep))
+		elif len(sleep_pre_ep):
+			sleep_ep = sleep_pre_ep
+		elif len(sleep_post_ep):
+			sleep_ep = sleep_post_ep						
+		return nts.IntervalSet(sleep_ep[:,0], sleep_ep[:,1], time_units = 's')
+
+	elif epoch == 'sws':
+		import os
+		file1 = path.split("/")[-1]+'.sts.SWS'
+		file2 = path.split("/")[-1]+'-states.mat'
+		listdir = os.listdir(path)
+		if file1 in listdir:
+			sws = np.genfromtxt(path+'/'+file1)/float(sampling_freq)
+			return nts.IntervalSet.drop_short_intervals(nts.IntervalSet(sws[:,0], sws[:,1], time_units = 's'), 0.0)
+
+		elif file2 in listdir:
+			sws = scipy.io.loadmat(path+'/'+file2)['states'][0]
+			index = np.logical_or(sws == 2, sws == 3)*1.0
+			index = index[1:] - index[0:-1]
+			start = np.where(index == 1)[0]+1
+			stop = np.where(index == -1)[0]
+			return nts.IntervalSet.drop_short_intervals(nts.IntervalSet(start, stop, time_units = 's', expect_fix=True), 0.0)
+
+	elif epoch == 'rem':
+		import os
+		file1 = path.split("/")[-1]+'.sts.REM'
+		file2 = path.split("/")[-1]+'-states.mat'
+		listdir = os.listdir(path)	
+		if file1 in listdir:
+			rem = np.genfromtxt(path+'/'+file1)/float(sampling_freq)
+			return nts.IntervalSet(rem[:,0], rem[:,1], time_units = 's').drop_short_intervals(0.0)
+
+		elif file2 in listdir:
+			rem = scipy.io.loadmat(path+'/'+file2)['states'][0]
+			index = (rem == 5)*1.0
+			index = index[1:] - index[0:-1]
+			start = np.where(index == 1)[0]+1
+			stop = np.where(index == -1)[0]
+			return nts.IntervalSet(start, stop, time_units = 's', expect_fix=True).drop_short_intervals(0.0)
+
+def loadRipples(path):	
+	# 0 : debut
+	# 1 : milieu
+	# 2 : fin
+	# 3 : amplitude nombre de sd au dessus de bruit
+	# 4 : frequence instantan
+	import neuroseries as nts
+	ripples = np.genfromtxt(path+'/'+path.split("/")[-1]+'.sts.RIPPLES')
+	return (nts.IntervalSet(ripples[:,0], ripples[:,2], time_units = 's'), 
+			nts.Ts(ripples[:,1], time_units = 's'))
+
+def loadTheta(path):	
+	import scipy.io
+	import neuroseries as nts
+	thetaInfo = scipy.io.loadmat(path)
+	troughs = nts.Tsd(thetaInfo['thetaTrghs'][0][0][2].flatten(), thetaInfo['thetaTrghs'][0][0][3].flatten(), time_units = 's')
+	peaks = nts.Tsd(thetaInfo['thetaPks'][0][0][2].flatten(), thetaInfo['thetaPks'][0][0][3].flatten(), time_units = 's')
+	good_ep = nts.IntervalSet(thetaInfo['goodEp'][0][0][1], thetaInfo['goodEp'][0][0][2], time_units = 's')	
+	tmp = (good_ep.as_units('s')['end'].iloc[-1] - good_ep.as_units('s')['start'].iloc[0])	
+	if (tmp/60.)/60. > 20. : # VERY BAD
+		good_ep = nts.IntervalSet(	good_ep.as_units('s')['start']*0.0001, 
+									good_ep.as_units('s')['end']*0.0001,
+									time_units = 's'
+								)
+	return good_ep	
+	# troughs = troughs.restrict(good_ep)
+	# peaks = peaks.restrict(good_ep)
+	# return troughs, peaks
+
+def loadSWRMod(path, datasets, return_index = False):
+	import _pickle as cPickle
+	tmp = cPickle.load(open(path, 'rb'))
+	z = []
+	index = []
+	for session in datasets:
+		neurons = np.array(list(tmp[session].keys()))
+		sorte = np.array([int(n.split("_")[1]) for n in neurons])
+		ind = np.argsort(sorte)			
+		for n in neurons[ind]:
+			z.append(tmp[session][n])						
+		index += list(neurons[ind])
+	z = np.vstack(z)
+	index = np.array(index)
+	if return_index:
+		return (z, index)
+	else:
+		return z
+
+def loadSpindMod(path, datasets, return_index = False):
+	import _pickle as cPickle
+	tmp = cPickle.load(open(path, 'rb'))
+	z = {'hpc':[], 'thl':[]}
+	index = {'hpc':[], 'thl':[]}
+	for k in z.keys():
+		for session in datasets:
+			neurons = np.array(list(tmp[session][k].keys()))
+			sorte = np.array([int(n.split("_")[1]) for n in neurons])
+			ind = np.argsort(sorte)			
+			for n in neurons[ind]:
+				z[k].append(tmp[session][k][n])				
+			index[k] += list(neurons[ind])
+		z[k] = np.vstack(z[k])
+		index[k] = np.array(index[k])
+	if return_index:
+		return (z, index)
+	else:
+		return z
+
+def loadThetaMod(path, datasets, return_index = False):
+	import _pickle as cPickle	
+	tmp = cPickle.load(open(path, 'rb'))
+	z = {'wake':[],'rem':[]}
+	index = {'wake':[], 'rem':[]}
+
+	for k in z.keys():
+		for session in datasets:
+			neurons = np.array(list(tmp[session][k].keys()))
+			sorte = np.array([int(n.split("_")[1]) for n in neurons])
+			ind = np.argsort(sorte)			
+			for n in neurons[ind]:
+				z[k].append(tmp[session][k][n])				
+			index[k] += list(neurons[ind])
+		z[k] = np.vstack(z[k])
+		index[k] = np.array(index[k])
+	if return_index:
+		return (z, index)
+	else:
+		return z
+
+def loadXML(path):
+	from xml.dom import minidom
+	xmldoc 		= minidom.parse(path)
+	nChannels 	= xmldoc.getElementsByTagName('acquisitionSystem')[0].getElementsByTagName('nChannels')[0].firstChild.data
+	fs 			= xmldoc.getElementsByTagName('fieldPotentials')[0].getElementsByTagName('lfpSamplingRate')[0].firstChild.data	
+	shank_to_channel = {}
+	groups 		= xmldoc.getElementsByTagName('anatomicalDescription')[0].getElementsByTagName('channelGroups')[0].getElementsByTagName('group')
+	for i in range(len(groups)):
+		shank_to_channel[i] = np.sort([int(child.firstChild.data) for child in groups[i].getElementsByTagName('channel')])
+	return int(nChannels), int(fs), shank_to_channel
+
+def loadLFP(path, n_channels=90, channel=64, frequency=1250.0, precision='int16'):
+	import neuroseries as nts
+	if type(channel) is not list:
+		f = open(path, 'rb')
+		startoffile = f.seek(0, 0)
+		endoffile = f.seek(0, 2)
+		bytes_size = 2		
+		n_samples = int((endoffile-startoffile)/n_channels/bytes_size)
+		duration = n_samples/frequency
+		interval = 1/frequency
+		f.close()
+		with open(path, 'rb') as f:
+			data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:,channel]
+		timestep = np.arange(0, len(data))/frequency
+		return nts.Tsd(timestep, data, time_units = 's')
+	elif type(channel) is list:
+		f = open(path, 'rb')
+		startoffile = f.seek(0, 0)
+		endoffile = f.seek(0, 2)
+		bytes_size = 2
+		
+		n_samples = int((endoffile-startoffile)/n_channels/bytes_size)
+		duration = n_samples/frequency
+		f.close()
+		with open(path, 'rb') as f:
+			data = np.fromfile(f, np.int16).reshape((n_samples, n_channels))[:,channel]
+		timestep = np.arange(0, len(data))/frequency
+		return nts.TsdFrame(timestep, data, time_units = 's')
+
+def loadBunch_Of_LFP(path,  start, stop, n_channels=90, channel=64, frequency=1250.0, precision='int16'):
+	import neuroseries as nts	
+	bytes_size = 2		
+	start_index = int(start*frequency*n_channels*bytes_size)
+	stop_index = int(stop*frequency*n_channels*bytes_size)
+	fp = np.memmap(path, np.int16, 'r', start_index, shape = (stop_index - start_index)//bytes_size)
+	data = np.array(fp).reshape(len(fp)//n_channels, n_channels)
+
+	if type(channel) is not list:
+		timestep = np.arange(0, len(data))/frequency
+		return nts.Tsd(timestep, data[:,channel], time_units = 's')
+	elif type(channel) is list:
+		timestep = np.arange(0, len(data))/frequency		
+		return nts.TsdFrame(timestep, data[:,channel], time_units = 's')
+
+def loadSpeed(path):
+	import neuroseries as nts
+	import scipy.io
+	raw = scipy.io.loadmat(path)
+	return nts.Tsd(raw['speed'][:,0], raw['speed'][:,1], time_units = 's')
+
+def writeNeuroscopeEvents(path, ep, name):
+	f = open(path, 'w')
+	for i in range(len(ep)):
+		f.writelines(str(ep.as_units('ms').iloc[i]['start']) + " "+name+" start "+ str(1)+"\n")
+		f.writelines(str(ep.as_units('ms').iloc[i]['end']) + " "+name+" end "+ str(1)+"\n")
+	f.close()		
+	return
+
+def plotEpoch(wake_ep, sleep_ep, rem_ep, sws_ep, ripples_ep, spikes_sws):
+	from pylab import figure, plot, legend, show
+	figure()
+	plot([wake_ep['start'][0], wake_ep['end'][0]], np.zeros(2), '-', color = 'blue', label = 'wake')
+	[plot([wake_ep['start'][i], wake_ep['end'][i]], np.zeros(2), '-', color = 'blue') for i in range(len(wake_ep))]
+	plot([sleep_ep['start'][0], sleep_ep['end'][0]], np.zeros(2), '-', color = 'green', label = 'sleep')
+	[plot([sleep_ep['start'][i], sleep_ep['end'][i]], np.zeros(2), '-', color = 'green') for i in range(len(sleep_ep))]	
+	plot([rem_ep['start'][0], rem_ep['end'][0]],  np.zeros(2)+0.1, '-', color = 'orange', label = 'rem')
+	[plot([rem_ep['start'][i], rem_ep['end'][i]], np.zeros(2)+0.1, '-', color = 'orange') for i in range(len(rem_ep))]
+	plot([sws_ep['start'][0], sws_ep['end'][0]],  np.zeros(2)+0.1, '-', color = 'red', label = 'sws')
+	[plot([sws_ep['start'][i], sws_ep['end'][i]], np.zeros(2)+0.1, '-', color = 'red') for i in range(len(sws_ep))]	
+	plot([ripples_ep['start'][0], ripples_ep['end'][0]],  np.zeros(2)+0.2, '-', color = 'black', label = 'ripples')
+	[plot([ripples_ep['start'][i], ripples_ep['end'][i]], np.zeros(2)+0.2, '-', color = 'black') for i in range(len(ripples_ep))]	
+	for n in spikes_sws.keys():
+		plot(spikes_sws[n].index.values, np.zeros(spikes_sws[n].size)+0.4, 'o')
 
 
-def load_datasets(data_dir, data_filename_stem):
-  """Load the datasets from a specified directory.
+	legend()
+	show()
 
-  Example files look like
-    >data_dir/my_dataset_first_day
-    >data_dir/my_dataset_second_day
+def plotThetaEpoch(wake_ep, sleep_ep, rem_ep, sws_ep, rem_peaks, rem_troughs, wake_peaks, wake_troughs):
+	from pylab import figure, plot, legend, show
+	figure()
+	plot([wake_ep['start'][0], wake_ep['end'][0]], np.zeros(2), '-', color = 'blue', label = 'wake')
+	[plot([wake_ep['start'][i], wake_ep['end'][i]], np.zeros(2), '-', color = 'blue') for i in range(len(wake_ep))]
+	plot([sleep_ep['start'][0], sleep_ep['end'][0]], np.zeros(2), '-', color = 'green', label = 'sleep')
+	[plot([sleep_ep['start'][i], sleep_ep['end'][i]], np.zeros(2), '-', color = 'green') for i in range(len(sleep_ep))]	
+	plot([rem_ep['start'][0], rem_ep['end'][0]],  np.zeros(2)+0.1, '-', color = 'orange', label = 'rem')
+	[plot([rem_ep['start'][i], rem_ep['end'][i]], np.zeros(2)+0.1, '-', color = 'orange') for i in range(len(rem_ep))]
+	plot([sws_ep['start'][0], sws_ep['end'][0]],  np.zeros(2)+0.1, '-', color = 'red', label = 'sws')
+	[plot([sws_ep['start'][i], sws_ep['end'][i]], np.zeros(2)+0.1, '-', color = 'red') for i in range(len(sws_ep))]	
 
-  If my_dataset (filename) stem is in the directory, the read routine will try
-  and load it.  The datasets dictionary will then look like
-  dataset['first_day'] -> (first day data dictionary)
-  dataset['second_day'] -> (first day data dictionary)
+	plot(rem_peaks.index.values, np.zeros(rem_peaks.size)+0.4, 'o')
+	plot(wake_peaks.index.values, np.zeros(wake_peaks.size)+0.4, 'o')
+	plot(rem_troughs.index.values, np.zeros(rem_troughs.size)+0.3, '+')
+	plot(wake_troughs.index.values, np.zeros(wake_troughs.size)+0.3, '+')
 
-  Args:
-    data_dir: The directory from which to load the datasets.
-    data_filename_stem: The stem of the filename for the datasets.
+	legend()
+	show()
 
-  Returns:
-    datasets: a dataset dictionary, with one name->data dictionary pair for
-    each dataset file.
-  """
-  print("Reading data from ", data_dir)
-  datasets = utils.read_datasets(data_dir, data_filename_stem)
-  for k, data_dict in datasets.items():
-    datasets[k] = clean_data_dict(data_dict)
+def makeTSNE(data):
+	from sklearn.manifold import TSNE
+	tsne = TSNE(n_components=2,
+				# early_exaggeration = 4, 
+				# n_iter = 10000,
+				perplexity = 10,
+				# learning_rate = 500,
+				# min_grad_norm = 1e-12,
+				# n_iter_without_progress = 1000,
+				# method = 'exact'
+			)
+	kluster = tsne.fit_transform(data)
+	return kluster, tsne.kl_divergence_
 
-    train_total_size = len(data_dict['train_data'])
-    if train_total_size == 0:
-      print("Did not load training set.")
-    else:
-      print("Found training set with number examples: ", train_total_size)
+def makeAllTSNE(data, n):
+	dview = Pool(cpu_count())
+	datatsne = dview.map_async(makeTSNE, [data.copy() for _ in range(n)]).get()
+	klusters = []
+	divergence = []
+	for kl, dv in datatsne:
+		klusters.append(kl)
+		divergence.append(dv)
+	klusters = np.dstack(klusters).T
+	divergence = np.array(divergence)
+	return klusters, divergence
 
-    valid_total_size = len(data_dict['valid_data'])
-    if valid_total_size == 0:
-      print("Did not load validation set.")
-    else:
-      print("Found validation set with number examples: ", valid_total_size)
 
-  return datasets
+def computeAngularTuningCurves(spikes, angle, ep, nb_bins = 180, frequency = 120.0):
+	bins 			= np.linspace(0, 2*np.pi, nb_bins)
+	idx 			= bins[0:-1]+np.diff(bins)/2
+	tuning_curves 	= pd.DataFrame(index = idx, columns = spikes.keys())	
+	# little bug here in neuroseries
+	angle.name 		= 0
+	angle 			= angle[~angle.index.duplicated(keep='first')]
+	angle 			= angle.restrict(ep)
+	# # Smoothing the angle here
+	# tmp 			= pd.Series(index = angle.index.values, data = np.unwrap(angle.values))
+	# tmp2 			= tmp.rolling(window=50,win_type='gaussian',center=True,min_periods=1).mean(std=10.0)
+	# angle			= nts.Tsd(tmp2%(2*np.pi))
+	for k in spikes:
+		spks 			= spikes[k]
+		true_ep 		= nts.IntervalSet(start = np.maximum(angle.index[0], spks.index[0]), 
+									end = np.minimum(angle.index[-1], spks.index[-1]))		
+		spks 			= spks.restrict(true_ep)		
+		angle_spike 	= angle.restrict(true_ep).realign(spks)
+		spike_count, bin_edges = np.histogram(angle_spike, bins)
+		occupancy, _ 	= np.histogram(angle, bins)
+		spike_count 	= spike_count/occupancy
+		tuning_curves[k] = spike_count*frequency
+
+	return tuning_curves
+
+def findHDCells(tuning_curves):
+	"""
+		Peak firing rate larger than 1
+		and Rayleigh test p<0.001 & z > 100
+	"""
+	cond1 = tuning_curves.max()>1.0
+	
+	from pycircstat.tests import rayleigh
+	stat = pd.DataFrame(index = tuning_curves.columns, columns = ['pval', 'z'])
+	for k in tuning_curves:
+		stat.loc[k] = rayleigh(tuning_curves[k].index.values, tuning_curves[k].values)
+	cond2 = np.logical_and(stat['pval']<0.001,stat['z']>100)
+	tokeep = np.where(np.logical_and(cond1, cond2))[0]
+	return tokeep, stat
+
+def decodeHD(tuning_curves, spikes, ep, bin_size = 200, px = None):
+	"""
+		See : Zhang, 1998, Interpreting Neuronal Population Activity by Reconstruction: Unified Framework With Application to Hippocampal Place Cells
+		tuning_curves: pd.DataFrame with angular position as index and columns as neuron
+		spikes : dictionnary of spike times
+		ep : nts.IntervalSet, the epochs for decoding
+		bin_size : in ms (default:200ms)
+		px : Occupancy. If None, px is uniform
+	"""		
+	if len(ep) == 1:
+		bins = np.arange(ep.as_units('ms').start.iloc[0], ep.as_units('ms').end.iloc[-1], bin_size)
+	else:
+		print("TODO, more than one epoch")
+		sys.exit()
+	
+	spike_counts = pd.DataFrame(index = bins[0:-1]+np.diff(bins)/2, columns = spikes.keys())
+	for k in spikes:
+		spks = spikes[k].restrict(ep).as_units('ms').index.values
+		spike_counts[k], _ = np.histogram(spks, bins)
+
+	tcurves_array = tuning_curves.values
+	spike_counts_array = spike_counts.values
+	proba_angle = np.zeros((spike_counts.shape[0], tuning_curves.shape[0]))
+
+	part1 = np.exp(-(bin_size/1000)*tcurves_array.sum(1))
+	if px is not None:
+		part2 = px
+	else:
+		part2 = np.ones(tuning_curves.shape[0])
+		# part2 = np.histogram(position['ry'], np.linspace(0, 2*np.pi, 61), weights = np.ones_like(position['ry'])/float(len(position['ry'])))[0]
+	
+	for i in range(len(proba_angle)):
+		part3 = np.prod(tcurves_array**spike_counts_array[i], 1)
+		p = part1 * part2 * part3
+		proba_angle[i] = p/p.sum() # Normalization process here
+
+	proba_angle  = pd.DataFrame(index = spike_counts.index.values, columns = tuning_curves.index.values, data= proba_angle)	
+	proba_angle = proba_angle.astype('float')		
+	decoded = nts.Tsd(t = proba_angle.index.values, d = proba_angle.idxmax(1).values, time_units = 'ms')
+	return decoded, proba_angle
