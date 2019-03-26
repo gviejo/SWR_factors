@@ -38,7 +38,7 @@ data_directory = '/mnt/DataGuillaume/MergedData/'
 datasets = np.loadtxt(data_directory+'datasets_ThalHpc.list', delimiter = '\n', dtype = str, comments = '#')
 datatosave = {}
 
-bin_size 		= 5 # ms
+bin_size 		= 10 # ms
 nb_bins 		= 200
 times 			= np.arange(0, bin_size*(nb_bins+1), bin_size) - (nb_bins*bin_size)/2
 bins 			= np.arange(times[0]-bin_size/2, times[-1]+bin_size/2+bin_size, bin_size)

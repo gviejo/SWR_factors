@@ -29,6 +29,7 @@ from time import time
 from lfads.utils import *
 from lfads.functions import *
 import pickle
+from sklearn.model_selection import train_test_split
 
 
 hps = hps_dict_to_obj({
@@ -101,10 +102,13 @@ t1 = time()
 #####################################################################################
 datasets = pickle.load(open("../data/swr_hist_Mouse12.pickle", "rb"))
 
+
 for s in datasets:
 	for k in ['train_truth', 'train_ext_input', 'valid_data','valid_truth', 'valid_ext_input', 'valid_train']:
 		if k not in datasets[s]:
-			datasets[s][k] = None                	
+			datasets[s][k] = None
+	datasets[s]['all_data'] = datasets[s]['train_data']
+
 
 
 hps.dataset_names = list(datasets.keys())
@@ -115,10 +119,10 @@ hps.ndatasets = len(hps.dataset_names)
 
 if hps.num_steps_for_gen_ic > hps.num_steps: hps.num_steps_for_gen_ic = hps.num_steps
 
-# sys.exit()
 
 
 with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_placement=False)) as session:
+
 	#####################################################################################
 	# train
 	#####################################################################################
@@ -142,8 +146,20 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 	valid_costs = []
 	learning_rates = []        
 	
+	count = 0
+	t1 = time()
+
 	while True:		
 		learning_rates.append(lr)
+
+		#####################################
+		# shuffling between train and valid
+		#####################################
+		for s in datasets:
+			data_train, data_valid = train_test_split(datasets[s]['all_data'])
+			datasets[s]['train_data'] = data_train[0:50]
+			datasets[s]['valid_data'] = data_valid[0:10]
+
 		#####################################################################################          
 		# self.train_epochs(datasets, do_save_ckpt=do_save_ckpt)
 		#####################################################################################
@@ -174,11 +190,11 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 		#####################################################################################
 		# self.run_epochs(datasets, ops_to_eval, kind="valid", keep_prob = 1.0)
 		#####################################################################################
-		all_name_example_idx_pairs = model.shuffle_and_flatten_datasets(datasets, 'train') # should be valid here
+		all_name_example_idx_pairs = model.shuffle_and_flatten_datasets(datasets, 'valid') # should be valid here
 		collected_op_values = np.zeros((3,len(all_name_example_idx_pairs)))
 		for j, (name, example_idxs) in enumerate(all_name_example_idx_pairs):
 			data_dict = datasets[name]
-			data_bxtxd, ext_input_bxtxi = model.get_batch(data_dict['train_data'], data_dict['train_ext_input'],example_idxs=example_idxs)
+			data_bxtxd, ext_input_bxtxi = model.get_batch(data_dict['valid_data'], data_dict['valid_ext_input'],example_idxs=example_idxs)
 			feed_dict = model.build_feed_dict(name, data_bxtxd, ext_input_bxtxi, keep_prob=1.0)
 			evaled_ops_np = session.run(ops_to_eval, feed_dict=feed_dict)            
 			collected_op_values[:,j] = np.array(evaled_ops_np[0:3])
@@ -203,6 +219,9 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 		if lr < lr_stop:
 			print("Stopping optimization based on learning rate criteria.")
 			break
+
+		print("Iteration %i ; Elapsed time : %d seconds" % (count, time()-t1))
+		count += 1
 	#####################################################################################
 
 	print("Training time %d seconds" % (time()-t1))
