@@ -34,7 +34,7 @@ from sklearn.model_selection import train_test_split
 
 hps = hps_dict_to_obj({
 	"data_dir":                     '../data/',        #"Data for training"    
-	"lfads_save_dir":               '../data/lfads_', #"model save dir"    
+	"lfads_save_dir":               '../data/lfads_test', #"model save dir"    
 	"kind":                         "train",      #"Type of model to build {train, posterior_sample_and_average, posterior_push_mean, prior_sample, write_model_params"    
 	"output_dist":                  'poisson',    #"Type of output distribution, 'poisson' or 'gaussian'"  
 	"allow_gpu_growth":             False,        #"If true, only allocate amount of memory needed for Session. Otherwise, use full GPU memory."    
@@ -101,7 +101,8 @@ t1 = time()
 # load_datasets
 #####################################################################################
 datasets = pickle.load(open("../data/swr_hist_Mouse12.pickle", "rb"))
-
+#s = list(datasets.keys())[0]
+#datasets = {s:datasets[list(datasets.keys())[0]]}
 
 for s in datasets:
 	for k in ['train_truth', 'train_ext_input', 'valid_data','valid_truth', 'valid_ext_input', 'valid_train']:
@@ -157,8 +158,8 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 		#####################################
 		for s in datasets:
 			data_train, data_valid = train_test_split(datasets[s]['all_data'])
-			datasets[s]['train_data'] = data_train[0:50]
-			datasets[s]['valid_data'] = data_valid[0:10]
+			datasets[s]['train_data'] = data_train	#[0:50]
+			datasets[s]['valid_data'] = data_valid	#[0:10]
 
 		#####################################################################################          
 		# self.train_epochs(datasets, do_save_ckpt=do_save_ckpt)
@@ -355,24 +356,44 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 			samples[data_name][data_kind] = model_runs
 
 
-x = datasets['dataset_N20_S20']['train_data']
-xp = samples['dataset_N20_S20']['train']['output_dist_params']
+s = list(samples.keys())[0]
 
-y = datasets['dataset_N10_S10']['train_data']
-yp = samples['dataset_N10_S10']['train']['output_dist_params']
+x = datasets[s]['train_data']
+xp = samples[s]['train']['output_dist_params']
+
+y = datasets[s]['train_data']
+yp = samples[s]['train']['output_dist_params']
 
 from pylab import *
 
-figure()
-plot(np.mean(x, 0)[:,0])
-plot(np.mean(xp, 0)[:,0])
+# figure()
+# plot(np.mean(x, 0)[:,0])
+# plot(np.mean(xp, 0)[:,0])
 
-figure()
-plot(np.mean(y, 0)[:,0])
-plot(np.mean(yp, 0)[:,0])
+# figure()
+# plot(np.mean(y, 0)[:,0])
+# plot(np.mean(yp, 0)[:,0])
 
 
-show()
+# show()
+
+
+factors = []
+
+for s in samples.keys():
+	dims = samples[s]['train']['factors'].shape
+	factors.append(samples[s]['train']['factors'].reshape(dims[0], dims[1] * dims[2]))
+
+factors = np.vstack(factors)
+
+from sklearn.manifold import TSNE
+
+X = TSNE(n_components=2, perplexity = 5).fit_transform(factors)
+
+scatter(X[:,0], X[:,1])
+
+
+
 
 
 # POSTERIOR PUSH MEAN
