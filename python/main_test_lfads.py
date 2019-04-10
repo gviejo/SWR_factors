@@ -72,7 +72,7 @@ hps = hps_dict_to_obj({
 	"controller_input_lag":         1,            #"Time lag on the encoding to controller t-lag for forward, t+lag for reverse."   
 	"ci_enc_dim":                   128,          #"Cell hidden size: encoder of control inputs"    
 	"con_dim":                      128,          #"Cell hidden size, controller"   
-	"batch_size":                   5,            #"Batch size to use during training." 
+	"batch_size":                   500,            #"Batch size to use during training." 
 	"learning_rate_init":           0.01,         #"Learning rate initial value"  
 	"learning_rate_decay_factor":   0.95,         #"Learning rate decay, decay by this fraction every so often."  
 	"learning_rate_stop":           0.00005,        #"The lr is adaptively reduced, stop training at this value."   
@@ -102,7 +102,7 @@ t1 = time()
 #####################################################################################
 datasets = pickle.load(open("../data/swr_hist_Mouse12.pickle", "rb"))
 #s = list(datasets.keys())[0]
-#datasets = {s:datasets[list(datasets.keys())[0]]}
+datasets = {s:datasets[s] for s in list(datasets.keys())[0:5]}
 
 for s in datasets:
 	for k in ['train_truth', 'train_ext_input', 'valid_data','valid_truth', 'valid_ext_input', 'valid_train']:
@@ -366,16 +366,16 @@ yp = samples[s]['train']['output_dist_params']
 
 from pylab import *
 
-# figure()
-# plot(np.mean(x, 0)[:,0])
-# plot(np.mean(xp, 0)[:,0])
+figure()
+plot(np.mean(x, 0)[:,0])
+plot(np.mean(xp, 0)[:,0])
 
-# figure()
-# plot(np.mean(y, 0)[:,0])
-# plot(np.mean(yp, 0)[:,0])
+figure()
+plot(np.mean(y, 0)[:,0])
+plot(np.mean(yp, 0)[:,0])
 
 
-# show()
+show()
 
 
 factors = []
@@ -388,7 +388,7 @@ factors = np.vstack(factors)
 
 from sklearn.manifold import TSNE
 
-X = TSNE(n_components=2, perplexity = 5).fit_transform(factors)
+X = TSNE(n_components=2, perplexity = 30).fit_transform(factors)
 
 scatter(X[:,0], X[:,1])
 
