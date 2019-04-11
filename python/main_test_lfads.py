@@ -180,8 +180,9 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 		#####################################################################################
 		
 		mean_cost = collected_op_values.mean(1)
-		tr_total_cost = mean_cost[0]
+		tr_total_cost, tr_recon_cost, tr_kl_cost, kl_weight, l2_cost, l2_weight = mean_cost
 		#####################################################################################
+
 
 		#####################################################################################
 		# self.eval_cost_epoch(datasets, kind='valid')
@@ -202,11 +203,26 @@ with tf.Session(config=tf.ConfigProto(allow_soft_placement=True, log_device_plac
 		#####################################################################################
 		
 		mean_cost = collected_op_values.mean(1)
-		ev_total_cost = mean_cost[0]
+		ev_total_cost, ev_recon_cost, ev_kl_cost = mean_cost
 		#####################################################################################
 
 		valid_costs.append(ev_total_cost)
 
+		# Plot and summarize
+		values = {	'nepochs':i, 
+					'has_any_valid_set': True,
+					'tr_total_cost':tr_total_cost, 
+					'ev_total_cost':ev_total_cost,
+					'tr_recon_cost':tr_recon_cost, 
+					'ev_recon_cost':ev_recon_cost,
+					'tr_kl_cost':tr_kl_cost, 
+					'ev_kl_cost':ev_kl_cost,
+					'l2_weight':l2_weight, 
+					'kl_weight':kl_weight,
+					'l2_cost':l2_cost
+				}
+		model.summarize_all(datasets, values)
+		
 		# Manage learning rate.        
 		n_lr = hps.learning_rate_n_to_compare        
 		if len(train_costs) > n_lr and tr_total_cost > np.max(train_costs[-n_lr:]):            
