@@ -14,7 +14,8 @@ from sklearn.model_selection import train_test_split
 
 
 
-data_directory = '../data/lfads_test_colab/'
+# data_directory = '../data/lfads_test_colab/'
+data_directory = '/mnt/DataGuillaume/Factors/model_runs_Mouse12'
 
 files = os.listdir(data_directory)
 
@@ -30,8 +31,8 @@ for f in files:
 		samples[k]['valid'] = read_data(os.path.join(data_directory, f))
 
 
-
 sys.exit()
+
 
 factors = []
 

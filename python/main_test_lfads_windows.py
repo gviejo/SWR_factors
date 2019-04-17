@@ -33,8 +33,8 @@ from sklearn.model_selection import train_test_split
 
 
 hps = hps_dict_to_obj({
-	"data_dir":                     '../data/',        #"Data for training"    
-	"lfads_save_dir":               '../data/lfads_test', #"model save dir"    
+	"data_dir":                     r"..\data\',        #"Data for training"    
+	"lfads_save_dir":               r"..\data\lfads_test", #"model save dir"    
 	"kind":                         "train",      #"Type of model to build {train, posterior_sample_and_average, posterior_push_mean, prior_sample, write_model_params"    
 	"output_dist":                  'poisson',    #"Type of output distribution, 'poisson' or 'gaussian'"  
 	"allow_gpu_growth":             False,        #"If true, only allocate amount of memory needed for Session. Otherwise, use full GPU memory."    
@@ -50,9 +50,9 @@ hps = hps_dict_to_obj({
 	"num_steps_for_gen_ic":         sys.maxsize,  #"Number of steps to train the generator initial conditon."   
 	"inject_ext_input_to_gen":      False,        #"Should observed inputs be input to model via encoders, or injected directly into generator?"    
 	"cell_weight_scale":            1.0,          #"Input scaling for input weights in generator."    
-	"ic_dim":                       64,           #"Dimension of h0"    
-	"factors_dim":                  50,           #"Number of factors from generator"   
-	"ic_enc_dim":                   128,          #"Cell hidden size, encoder of h0"    
+	"ic_dim":                       32,           #"Dimension of h0"    
+	"factors_dim":                  20,           #"Number of factors from generator"   
+	"ic_enc_dim":                   64,          #"Cell hidden size, encoder of h0"    
 	"gen_dim":                      200,          #"Cell hidden size, generator."   
 	"gen_cell_input_weight_scale":  1.0,          #"Input scaling for input weights in generator."    
 	"gen_cell_rec_weight_scale":    1.0,          #"Input scaling for rec weights in generator."  
@@ -74,8 +74,8 @@ hps = hps_dict_to_obj({
 	"con_dim":                      128,          #"Cell hidden size, controller"   
 	"batch_size":                   400,            #"Batch size to use during training." 
 	"learning_rate_init":           0.01,         #"Learning rate initial value"  
-	"learning_rate_decay_factor":   0.95,         #"Learning rate decay, decay by this fraction every so often."  
-	"learning_rate_stop":           0.00005,        #"The lr is adaptively reduced, stop training at this value."   
+	"learning_rate_decay_factor":   0.4,         #"Learning rate decay, decay by this fraction every so often."  
+	"learning_rate_stop":           0.000001,     #"The lr is adaptively reduced, stop training at this value."   
 	"learning_rate_n_to_compare":   10,            #"Number of previous costs current cost has to be worse than, to lower learning rate."    
 	"max_grad_norm":                200.0,        #"Max norm of gradient before clipping."    
 	"cell_clip_value":              5.0,          #"Max value recurrent cell can take before being clipped."  
@@ -102,7 +102,7 @@ t1 = time()
 #####################################################################################
 datasets = pickle.load(open("../data/swr_hist_Mouse12.pickle", "rb"))
 # s = list(datasets.keys())[0]
-datasets = {s:datasets[s] for s in list(datasets.keys())[0:3]}
+datasets = {s:datasets[s] for s in list(datasets.keys())}
 
 for s in datasets:
 	for k in ['train_truth', 'train_ext_input', 'valid_data','valid_truth', 'valid_ext_input', 'valid_train']:
