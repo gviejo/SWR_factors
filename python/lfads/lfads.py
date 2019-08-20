@@ -316,10 +316,10 @@ class LFADS(object):
         # Additionally, the data_dim will be inferred as well, allowing for a
         # single placeholder for all datasets, regardless of data dimension.
         if hps.output_dist == 'poisson': # Enforce correct dtype        
-            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.int32), "Data dtype must be int for poisson output distribution"
+            assert np.issubdtype(datasets[hps.dataset_names[0]]['all_data'].dtype, np.int32), "Data dtype must be int for poisson output distribution"
             data_dtype = tf.int32
         elif hps.output_dist == 'gaussian':
-            assert np.issubdtype(datasets[hps.dataset_names[0]]['train_data'].dtype, np.float32), "Data dtype must be float for gaussian output dsitribution"
+            assert np.issubdtype(datasets[hps.dataset_names[0]]['all_data'].dtype, np.float32), "Data dtype must be float for gaussian output dsitribution"
             data_dtype = tf.float32
         else:
             assert False, "NIY"
@@ -1154,12 +1154,12 @@ class LFADS(object):
                                              self.recon_cost_ph:ev_recon_cost,
                                              self.total_cost_ph:ev_total_cost})
           self.writer.add_summary(eval_summ, train_step)
-          print("Epoch:%d, step:%d (TRAIN, VALID): total: %.2f, %.2f\
-          recon: %.2f, %.2f,     kl: %.2f, %.2f,     l2: %.5f,\
-          kl weight: %.2f, l2 weight: %.2f" % \
-                (i, train_step, tr_total_cost, ev_total_cost,
-                 tr_recon_cost, ev_recon_cost, tr_kl_cost, ev_kl_cost,
-                 l2_cost, kl_weight, l2_weight))
+          # print("Epoch:%d, step:%d (TRAIN, VALID): total: %.2f, %.2f\
+          # recon: %.2f, %.2f,     kl: %.2f, %.2f,     l2: %.5f,\
+          # kl weight: %.2f, l2 weight: %.2f" % \
+          #       (i, train_step, tr_total_cost, ev_total_cost,
+          #        tr_recon_cost, ev_recon_cost, tr_kl_cost, ev_kl_cost,
+          #        l2_cost, kl_weight, l2_weight))
 
           csv_outstr = "epoch,%d, step,%d, total,%.2f,%.2f, \
           recon,%.2f,%.2f, kl,%.2f,%.2f, l2,%.5f, \
@@ -1169,10 +1169,10 @@ class LFADS(object):
            l2_cost, kl_weight, l2_weight)
 
         else:
-          print("Epoch:%d, step:%d TRAIN: total: %.2f     recon: %.2f, kl: %.2f,\
-          l2: %.5f,    kl weight: %.2f, l2 weight: %.2f" % \
-                (i, train_step, tr_total_cost, tr_recon_cost, tr_kl_cost,
-                 l2_cost, kl_weight, l2_weight))
+          # print("Epoch:%d, step:%d TRAIN: total: %.2f     recon: %.2f, kl: %.2f,\
+          # l2: %.5f,    kl weight: %.2f, l2 weight: %.2f" % \
+          #       (i, train_step, tr_total_cost, tr_recon_cost, tr_kl_cost,
+          #        l2_cost, kl_weight, l2_weight))
           csv_outstr = "epoch,%d, step,%d, total,%.2f, recon,%.2f, kl,%.2f, \
           l2,%.5f, klweight,%.2f, l2weight,%.2f\n"% \
           (i, train_step, tr_total_cost, tr_recon_cost,

@@ -12,7 +12,7 @@ from lfads.functions import *
 import pickle
 from sklearn.model_selection import train_test_split
 
-
+sys.exit()
 
 # data_directory = '../data/lfads_test_colab/'
 data_directory = '/mnt/DataGuillaume/Factors/model_runs_Mouse12'
